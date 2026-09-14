@@ -1,5 +1,5 @@
 ---
-title: "Visualizing Data Independent Project"
+title: "Mental State and Match Outcomes in Overwatch"
 format:
   html:
     embed-resources: true
