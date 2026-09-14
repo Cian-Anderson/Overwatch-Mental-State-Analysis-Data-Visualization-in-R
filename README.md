@@ -36,7 +36,7 @@ The analysis demonstrates association rather than causation.
 
 ## View the Project
 
-### [View the Full Data Story](https://cian-anderson.github.io/Overwatch-Mental-State-Analysis-Data-Visualization-in-R/)
+### [View the Full Interactive Data Story](https://cian-anderson.github.io/Overwatch-Mental-State-Analysis-Data-Visualization-in-R/)
 
 The rendered Quarto project contains the complete exploratory analysis,
 interactive visualisations, findings, methodology, and discussion.
@@ -48,10 +48,12 @@ statistical modelling, and visualisation.
 
 ## Repository Structure
 
+## Repository Structure
+
 ```text
 .
 ├── README.md
 ├── analysis.qmd
-├── analysis.html
+├── index.html
 └── data/
     └── overwatch_competitions_data_clear.csv
