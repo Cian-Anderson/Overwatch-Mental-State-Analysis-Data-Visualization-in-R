@@ -16,7 +16,7 @@ library(scales)
 library(plotly)
 
 # Load data
-ow <- read_csv("overwatch_competitions_data_clear.csv")
+ow <- read_csv("data/overwatch_competitions_data_clear.csv")
 
 # Group raw psychological condition values into broader mental-state groups
 ow_clean <- ow %>%
