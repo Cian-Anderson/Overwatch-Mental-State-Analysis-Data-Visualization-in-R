@@ -1,0 +1,1208 @@
+---
+title: "Visualizing Data Independent Project"
+format:
+  html:
+    embed-resources: true
+    self-contained: true
+    code-fold: true
+    code-copy: true
+    code-tools: true
+editor: visual
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(scales)
+library(plotly)
+
+# Load data
+ow <- read_csv("overwatch_competitions_data_clear.csv")
+
+# Group raw psychological condition values into broader mental-state groups
+ow_clean <- ow %>%
+  mutate(
+    psychological_condition = str_trim(tolower(psychological_condition))
+  ) %>%
+  filter(
+    psychological_condition != "",
+    !is.na(psychological_condition),
+    !is.na(result)
+  ) %>%
+  mutate(
+    mental_state = case_when(
+      psychological_condition %in% c(
+        "angry", "bad", "bugged", "bummed", "depressed",
+        "tense", "tilted", "worried", "scared", "exhausted"
+      ) ~ "Negative",
+      psychological_condition %in% c(
+        "good", "great", "talkative", "relieved", "hopeful"
+      ) ~ "Positive",
+      psychological_condition %in% c(
+        "meh", "accepting", "confused"
+      ) ~ "Neutral",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(mental_state != "Other")
+
+# Prepared dataset used for exploratory charts
+ow_explore <- ow_clean %>%
+  mutate(
+    sr_delta = readr::parse_number(as.character(sr_delta)),
+    streak_number = readr::parse_number(as.character(streak_number)),
+    match_length = readr::parse_number(as.character(match_length)),
+    result = stringr::str_to_lower(result)
+  ) %>%
+  filter(
+    !is.na(sr_delta),
+    sr_delta >= -100,
+    sr_delta <= 100
+  )
+
+# Summarise dataset size for the written dataset overview
+raw_rows <- nrow(ow)
+raw_variables <- ncol(ow)
+
+clean_rows <- nrow(ow_clean)
+clean_variables <- ncol(ow_clean)
+
+explore_rows <- nrow(ow_explore)
+# Prepared dataset used for difficulty-related exploration
+ow_neg <- ow_clean %>%
+  mutate(
+    negative = mental_state == "Negative",
+    my_team_sr = readr::parse_number(as.character(my_team_sr)),
+    enemy_team_sr = readr::parse_number(as.character(enemy_team_sr)),
+    difficulty = enemy_team_sr - my_team_sr
+  )
+
+# Build proportions for a 100% stacked bar chart
+mental_outcome_summary <- ow_clean %>%
+  count(mental_state, result) %>%
+  group_by(mental_state) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+difficulty_plot <- ow_neg %>%
+  filter(!is.na(difficulty)) %>%
+  mutate(
+    diff_bin = cut(
+      difficulty,
+      breaks = c(-150, -75, -25, 0, 25, 75, 150),
+      include.lowest = TRUE,
+      labels = c(
+        "Much easier",
+        "Easier",
+        "Slightly easier",
+        "Even",
+        "Slightly harder",
+        "Harder"
+      )
+    )
+  ) %>%
+  group_by(diff_bin) %>%
+  summarise(neg_rate = mean(negative), .groups = "drop") %>%
+  ggplot(aes(diff_bin, neg_rate)) +
+  geom_col(fill = "#C44E52") +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 0.45)) +
+  labs(
+    title = "Match difficulty increases negative mental states",
+    x = "Relative match difficulty",
+    y = "% Negative"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Mental State and Match Outcomes in Overwatch
+
+## A data story on how in-game context shapes performance
+
+## Context
+
+This dataset contains match-level data from Overwatch, a competitive team-based video game. Each row represents a match and includes the result, the player's recorded mental state, ranking-point changes, and in-game conditions such as difficulty and performance streaks.
+
+## Dataset Overview
+
+This project uses a match-level Overwatch dataset. Each row represents one ranked match, with variables describing the match result, SR change, player mental state, streak number, player role, selected character, match length, and related in-game context.
+
+The raw dataset contains **3,299 matches** and **46 variables**. After removing records with missing or unusable mental-state information, **3,264 matches** remained for analysis. A small number of derived fields were created for visualisation, including grouped mental-state categories used in the final charts.
+
+::: {.callout-note collapse="true"}
+### Sample of the Analysis Dataset
+
+```{r}
+#| label: tbl-data-sample
+#| echo: false
+#| message: false
+#| warning: false
+#| tbl-cap: "Sample complete rows from the cleaned Overwatch match dataset."
+
+set.seed(4091)
+
+ow_clean %>%
+  dplyr::select(tidyselect::any_of(c(
+    "result",
+    "mental_state",
+    "sr_delta",
+    "streak_number",
+    "charcter_1",
+    "match_length"
+  ))) %>%
+  dplyr::filter(dplyr::if_all(dplyr::everything(), ~ !is.na(.x))) %>%
+  dplyr::slice_sample(n = 6) %>%
+  dplyr::rename(
+    Result = result,
+    `Mental state` = mental_state,
+    `SR change` = sr_delta,
+    `Streak number` = streak_number,
+    Hero = charcter_1,
+    `Match length` = match_length
+  ) %>%
+  knitr::kable()
+```
+:::
+
+## Key Terms
+
+This project uses data from Overwatch, a team-based competitive video game where players win or lose ranked matches.
+
+-   **Match:** One completed game of Overwatch.
+-   **Win / Loss / Draw:** The final result of a match.
+-   **SR (Skill Rating):** A ranking score used to represent player performance level. Winning usually increases SR, while losing usually decreases it.
+-   **SR change:** The number of ranking points gained or lost after a match.
+-   **Mental state:** The recorded emotional state of the player during or after a match.
+-   **Negative mental state:** A grouped category used here to represent frustration, stress, or tilt-related states.
+-   **Tilt:** A frustrated mental state where emotions interfere with decision-making.
+-   **Losing streak:** A sequence of repeated losses across matches.
+-   **Hero / character:** The playable character selected by the player.
+-   **Role:** A broad gameplay responsibility, such as attacking, defending, or supporting the team.
+
+## Exploratory Analysis
+
+Before designing the final explanatory visualisations, I explored several variables to identify which relationships were worth developing into the final data story. These charts are intentionally more exploratory than the final visuals: they helped test possible patterns, eliminate weaker variables, and decide which relationships best supported the Big Idea.
+
+### 1. SR Change Distribution
+
+```{r}
+#| warning: false
+#| message: false
+
+ggplot(ow_explore, aes(x = sr_delta)) +
+  geom_histogram(binwidth = 5, fill = "grey45", colour = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Distribution of SR Changes",
+    subtitle = "Most matches cluster around typical win/loss SR movement",
+    x = "SR Change",
+    y = "Number of Matches"
+  )
+```
+
+**What this showed:** Most SR changes cluster around typical win/loss values, with fewer matches showing very large gains or losses.
+
+**How it shaped the final story:** This suggested that SR change was relevant to player experience, but needed filtering before being used in the final explanatory chart so that extreme values did not dominate the visualisation.
+
+### 2. Mental State Across Player Roles
+
+```{r}
+#| warning: false
+#| message: false
+
+ggplot(
+  ow_explore %>%
+    filter(
+      psychological_condition != "",
+      team_role != "",
+      team_role != "w"
+    ),
+  aes(x = team_role, fill = mental_state)
+) +
+  geom_bar(position = "fill", colour = "white") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Mental State Distribution Across Roles",
+    x = "Player Role",
+    y = "Proportion of Matches",
+    fill = "Mental State"
+  )
+```
+
+**What this showed:** Mental-state proportions were broadly similar across player roles, with only small differences between attack, cp, and defend.
+
+**How it shaped the final story:** Role did not appear to be a strong enough factor to drive the main narrative, so it was not carried forward into the explanatory section.
+
+### 3. Psychological Condition by Match Result
+
+```{r}
+#| warning: false
+#| message: false
+
+ow_explore %>%
+  filter(
+    psychological_condition != "",
+    result %in% c("win", "loss", "draw")
+  ) %>%
+  count(psychological_condition, result) %>%
+  group_by(psychological_condition) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = reorder(psychological_condition, prop), y = prop, fill = result)) +
+  geom_col(position = "fill", colour = "white") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Raw Psychological Conditions by Match Result",
+    subtitle = "Early exploration before grouping mental states",
+    x = "Psychological Condition",
+    y = "Proportion of Matches",
+    fill = "Result"
+  )
+```
+
+**What this showed:** Detailed psychological-condition labels showed different result patterns, but there were too many categories for a clear final story.
+
+**How it shaped the final story:** This supported grouping the raw psychological labels into broader Negative, Neutral, and Positive mental-state categories, reducing complexity and making the final charts easier to interpret.
+
+### 4. Mental State Counts Across Streak Numbers
+
+```{r}
+#| warning: false
+#| message: false
+
+ow_explore %>%
+  filter(!is.na(streak_number), mental_state != "") %>%
+  count(streak_number, mental_state) %>%
+  ggplot(aes(x = streak_number, y = n, fill = mental_state)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Mental State Counts Across Streak Numbers",
+    x = "Streak Number",
+    y = "Number of Matches",
+    fill = "Mental State"
+  )
+```
+
+**What this showed:** Mental states varied across streak numbers, but the count-based chart was noisy and hard to compare directly.
+
+**How it shaped the final story:** This suggested that streaks were worth investigating further, but that the final chart should use proportions rather than raw counts to make the pattern clearer.
+
+### 5. Average SR Change by Match Length
+
+```{r}
+#| warning: false
+#| message: false
+
+ow_explore %>%
+  filter(!is.na(match_length), !is.na(sr_delta)) %>%
+  mutate(
+    match_length_group = cut(
+      match_length,
+      breaks = c(0, 5, 10, 15, 20, 30),
+      labels = c("0-5", "5-10", "10-15", "15-20", "20-30"),
+      include.lowest = TRUE
+    )
+  ) %>%
+  group_by(match_length_group) %>%
+  summarise(
+    avg_sr = mean(sr_delta),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = match_length_group, y = avg_sr)) +
+  geom_col(fill = "grey55") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Average SR Change by Match Length",
+    x = "Match Length",
+    y = "Average SR Change"
+  )
+```
+
+**What this showed:** Average SR change did not show a strong or useful pattern across match-length groups.
+
+**How it shaped the final story:** Match length was not used as a main explanatory factor because it did not contribute clearly to the tilt-loop narrative.
+
+## The Big Idea
+
+**Tilt is associated with a much higher loss probability, and once triggered, elevated loss risk persists across multiple matches.**
+
+“Tilt”, a negative emotional state that can disrupt decision-making, appears to form part of a self-reinforcing loop in competitive play:
+
+-   Losing is associated with a higher likelihood of entering a negative mental state
+-   Negative mental state is associated with a higher chance of losing again
+-   This creates a feedback pattern where poor outcomes and negative mental state reinforce each other
+
+Tilt is not just a reaction to losing. It is also associated with continued future losses.
+
+## What is "Tilt"?
+
+"Tilt" is a slang term widely used in gaming and esports to describe a player entering a negative mental state during play.
+
+Originally, the term comes from pinball machines, where physically tilting the machine would trigger a “TILT” warning and shut the game down. It was later adopted in poker to describe players who, after frustration or bad luck, begin making irrational decisions. Today, the term is commonly used in competitive video games.
+
+In gaming contexts, tilt is generally understood as:
+
+> A state of emotional frustration or loss of control that leads to worse decision-making and poorer performance.
+
+Research in esports psychology describes tilt more formally as:
+
+-   frustration or anger triggered by in-game events
+-   reduced ability to make good decisions
+-   increased impulsive or irrational behavior
+-   a measurable decline in performance
+
+In simple terms, tilt is what happens when a player stops playing at their best because their emotions take over.
+
+This raises a key question:
+
+> If tilt affects decision-making and performance, does it actually impact match outcomes?
+
+## Tilt Predicts Losing
+
+Once tilt has been defined, the first question is whether it is reflected in match outcomes.
+
+> Do matches recorded in a negative mental state end differently from neutral or positive matches?
+
+This chart compares the outcome mix within each mental-state group. The key pattern is immediate: the negative mental-state group has the highest share of losses, while the positive mental-state group has the lowest.
+
+```{r}
+#| label: fig-mental-state-outcomes
+#| fig-cap: "Match outcomes differ sharply by player mental state."
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4.3
+#| out-width: "100%"
+
+library(tidyverse)
+library(scales)
+library(plotly)
+
+mental_outcome_summary <- ow_clean %>%
+  filter(!is.na(mental_state), !is.na(result)) %>%
+  mutate(
+    mental_state = factor(
+      mental_state,
+      levels = c("Negative", "Neutral", "Positive")
+    ),
+    result = factor(
+      str_to_title(result),
+      levels = c("Win", "Draw", "Loss")
+    )
+  ) %>%
+  count(mental_state, result, name = "match_count") %>%
+  group_by(mental_state) %>%
+  mutate(
+    prop = match_count / sum(match_count),
+    total_matches = sum(match_count)
+  ) %>%
+  ungroup()
+
+overall_result_rates <- ow_clean %>%
+  filter(!is.na(result)) %>%
+  mutate(
+    result = factor(
+      str_to_title(result),
+      levels = c("Win", "Draw", "Loss")
+    )
+  ) %>%
+  count(result, name = "overall_count") %>%
+  mutate(
+    overall_prop = overall_count / sum(overall_count)
+  )
+
+mental_outcome_summary <- mental_outcome_summary %>%
+  left_join(overall_result_rates, by = "result") %>%
+  mutate(
+    diff_from_overall = prop - overall_prop,
+    hover_text = paste0(
+      as.character(result), " count: ", match_count,
+      "<br>Group total: ", total_matches,
+      "<br>Vs overall ", str_to_lower(as.character(result)), ": ",
+      if_else(diff_from_overall >= 0, "+", ""),
+      round(diff_from_overall * 100, 1), " pts"
+    )
+  )
+
+loss_labels <- mental_outcome_summary %>%
+  filter(result == "Loss") %>%
+  mutate(
+    label = paste0("Losses: ", percent(prop, accuracy = 1)),
+    label_y = prop / 2,
+    label_size = if_else(prop < 0.12, 3.2, 4)
+  )
+
+mental_outcome_plot <- ggplot(
+  mental_outcome_summary,
+  aes(
+    x = mental_state,
+    y = prop,
+    fill = result,
+    text = hover_text
+  )
+) +
+  geom_col(
+    width = 0.56,
+    colour = "white",
+    linewidth = 0.5
+  ) +
+  geom_text(
+    data = loss_labels,
+    aes(
+      x = mental_state,
+      y = label_y,
+      label = label,
+      size = label_size
+    ),
+    colour = "white",
+    fontface = "bold",
+    show.legend = FALSE,
+    inherit.aes = FALSE
+  ) +
+  scale_size_identity() +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0, 1.05),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Win" = "#63B352",
+      "Draw" = "#B8C2CC",
+      "Loss" = "#C65A5A"
+    )
+  ) +
+  labs(
+    title = "Tilted players lose more",
+    subtitle = "Negative mental state has the highest loss share",
+    x = "Mental state",
+    y = "Proportion of matches",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 18,
+      margin = margin(b = 6)
+    ),
+    plot.subtitle = element_text(
+      size = 10.5,
+      colour = "grey35",
+      margin = margin(b = 10)
+    ),
+    plot.title.position = "plot",
+    axis.title = element_text(face = "bold"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 14)),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(15, 15, 15, 15)
+  )
+
+ggplotly(mental_outcome_plot, tooltip = "text") %>%
+  layout(
+    legend = list(
+      orientation = "h",
+      x = 0.5,
+      xanchor = "center",
+      y = -0.22
+    ),
+    margin = list(b = 110),
+    xaxis = list(
+      title = list(
+        text = "<b>Mental state</b>",
+        standoff = 12
+      )
+    )
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+Players in a negative mental state lose far more often than players in neutral or positive mental states. In this dataset, **84% of negative mental-state matches are losses**, compared with **49% of neutral matches** and **7% of positive matches**.
+
+This establishes the first piece of evidence: tilt is not only an emotional label in the data. It is strongly associated with poorer match outcomes.
+
+The next step is to examine what in-game patterns appear around tilt.
+
+## What Is Associated With Tilt?
+
+If negative mental state is associated with poorer match outcomes, the next step is to examine the in-game patterns that appear around tilt. Two patterns stand out in the data: SR changes and losing streaks.
+
+## Ranking Losses Are Associated With Tilt
+
+SR, or Skill Rating, is the player’s ranking score. A negative SR change means the player lost ranking points after a match, while a positive SR change means they gained ranking points.
+
+The first pattern to examine is whether larger ranking-point losses are associated with a higher probability of negative mental state.
+
+> Are larger SR losses associated with a higher chance of tilt?
+
+```{r}
+#| label: fig-sr-change-tilt
+#| fig-cap: "Large ranking-point losses are associated with a higher probability of negative mental state."
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4.3
+#| out-width: "100%"
+
+library(tidyverse)
+library(scales)
+library(plotly)
+
+# Prepare model data for SR change and mental state
+ow_model <- ow_clean %>%
+  mutate(
+    sr_delta_num = readr::parse_number(as.character(sr_delta)),
+    negative = mental_state == "Negative"
+  ) %>%
+  filter(
+    !is.na(sr_delta_num),
+    !is.na(negative),
+    sr_delta_num >= -75,
+    sr_delta_num <= 75
+  )
+
+# Summarise observed negative rate within 10-point SR bands
+sr_plot_data <- ow_model %>%
+  mutate(sr_bin = cut_width(sr_delta_num, width = 10, boundary = 0)) %>%
+  group_by(sr_bin) %>%
+  summarise(
+    sr_mid = mean(sr_delta_num),
+    neg_rate = mean(negative),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  filter(n >= 8) %>%
+  mutate(
+     hover_text = paste0(
+    "SR change: ≈", round(sr_mid), " SR",
+    "<br>Tilt rate: ", percent(neg_rate, accuracy = 1),
+    "<br>Match count: ", n
+  )
+  )
+
+# Fit logistic model
+sr_fit <- glm(
+  negative ~ sr_delta_num,
+  data = ow_model,
+  family = binomial()
+)
+
+# Prediction grid for smooth fitted curve
+pred_grid <- tibble(
+  sr_delta_num = seq(-70, 65, length.out = 250)
+)
+
+pred <- predict(sr_fit, newdata = pred_grid, type = "link", se.fit = TRUE)
+
+pred_grid <- pred_grid %>%
+  mutate(
+    fit_link = pred$fit,
+    se_link = pred$se.fit,
+    fit = plogis(fit_link),
+    lower = plogis(fit_link - 1.96 * se_link),
+    upper = plogis(fit_link + 1.96 * se_link),
+    hover_text = paste0(
+      "SR change: ", round(sr_delta_num), " SR",
+      "<br>Est. tilt chance: ", percent(fit, accuracy = 1),
+      "<br>Uncertainty range: ",
+      percent(lower, accuracy = 1), " to ", percent(upper, accuracy = 1)
+    )
+  )
+
+plot_ly() %>%
+  add_ribbons(
+    data = pred_grid,
+    x = ~sr_delta_num,
+    ymin = ~lower,
+    ymax = ~upper,
+    hoverinfo = "skip",
+    line = list(color = "rgba(0,0,0,0)"),
+    fillcolor = "rgba(196,78,82,0.10)",
+    showlegend = FALSE
+  ) %>%
+  add_lines(
+    data = pred_grid,
+    x = ~sr_delta_num,
+    y = ~fit,
+    text = ~hover_text,
+    hovertemplate = "%{text}<extra></extra>",
+    line = list(color = "#C44E52", width = 3),
+    showlegend = FALSE
+  ) %>%
+  add_markers(
+    data = sr_plot_data,
+    x = ~sr_mid,
+    y = ~neg_rate,
+    text = ~hover_text,
+    hovertemplate = "%{text}<extra></extra>",
+    marker = list(
+      color = "rgba(76,114,176,0.55)",
+      size = 8
+    ),
+    showlegend = FALSE
+  ) %>%
+  layout(
+    title = list(
+      text = paste0(
+        "<b>Large ranking-point losses are linked with more tilt</b>",
+        "<br><span style='font-size:11px;color:#666666;'>",
+        "Large SR losses are associated with a much higher probability of negative mental state",
+        "</span>"
+      ),
+      x = 0,
+      xanchor = "left"
+    ),
+    xaxis = list(
+      title = list(text = "<b>SR change</b>"),
+      range = c(-70, 65),
+      tickvals = seq(-60, 60, by = 20),
+      showgrid = TRUE,
+      gridcolor = "#E6E6E6",
+      zeroline = FALSE
+    ),
+    yaxis = list(
+      title = list(text = "<b>Probability of negative mental state</b>"),
+      range = c(0, 0.56),
+      tickformat = ".0%",
+      showgrid = TRUE,
+      gridcolor = "#E6E6E6",
+      zeroline = FALSE
+    ),
+    plot_bgcolor = "white",
+    paper_bgcolor = "white",
+    margin = list(l = 70, r = 40, t = 70, b = 60),
+    annotations = list(
+      list(
+        x = -45,
+        y = 0.40,
+        text = "<b>Large SR losses<br>are linked to more tilt</b>",
+        showarrow = FALSE,
+        bgcolor = "white",
+        bordercolor = "rgba(0,0,0,0.25)",
+        borderwidth = 1,
+        align = "left",
+        font = list(color = "#333333", size = 12)
+      ),
+      list(
+        x = -33,
+        y = 0.23,
+        ax = -42,
+        ay = 0.36,
+        xref = "x",
+        yref = "y",
+        axref = "x",
+        ayref = "y",
+        text = "",
+        showarrow = TRUE,
+        arrowhead = 2,
+        arrowsize = 1,
+        arrowwidth = 1,
+        arrowcolor = "#333333"
+      ),
+      list(
+        x = 28,
+        y = 0.09,
+        text = "As SR improves,<br>negative states become rare",
+        showarrow = FALSE,
+        bgcolor = "white",
+        bordercolor = "rgba(0,0,0,0.20)",
+        borderwidth = 1,
+        align = "left",
+        font = list(color = "#555555", size = 11)
+      )
+    )
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+**Note:** The fitted line summarises the overall trend, while the points show observed tilt rates within SR-change bands. The shaded area represents uncertainty around the fitted trend.
+
+As ranking-point losses become larger, the probability of negative mental state also rises. In contrast, positive SR changes are associated with much lower rates of negative mental state.
+
+This provides the next piece of evidence for the tilt-loop pattern: poor performance feedback and negative mental state appear closely linked.
+
+The next question is whether the same pattern appears across repeated losses.
+
+## Losing Streaks Are Associated With Tilt
+
+The previous chart showed that ranking-point losses are associated with negative mental state.\
+The next question is whether negative mental state becomes more common when losses continue over several matches.
+
+> Does negative mental state become more common as losing streaks grow longer?
+
+This chart compares the probability of negative mental state across short winning and losing streaks. Negative values indicate losing streaks, while positive values indicate winning streaks.
+
+```{r}
+#| label: fig-losing-streak-tilt
+#| fig-cap: "Negative mental state becomes more likely during longer losing streaks."
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4.3
+#| out-width: "100%"
+
+library(tidyverse)
+library(scales)
+library(plotly)
+
+baseline_neg <- mean(ow_clean$mental_state == "Negative", na.rm = TRUE)
+
+streak_plot_data <- ow_clean %>%
+  mutate(
+    negative = mental_state == "Negative",
+    streak_number = readr::parse_number(as.character(streak_number))
+  ) %>%
+  filter(!is.na(streak_number), streak_number >= -3, streak_number <= 3) %>%
+  group_by(streak_number) %>%
+  summarise(
+    tilt_rate = mean(negative),
+    match_count = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    fill_col = case_when(
+      streak_number < 0 ~ "#C65A5A",
+      streak_number == 0 ~ "#D98C8C",
+      streak_number > 0 ~ "#E7B8B8"
+    ),
+    label = percent(tilt_rate, accuracy = 1),
+    label_y_high = tilt_rate - 0.03,
+    label_y_low = tilt_rate + 0.015,
+    diff_from_avg = tilt_rate - baseline_neg,
+    rate_ratio = tilt_rate / baseline_neg,
+    hover_text = paste0(
+      "Match count: ", match_count,
+      "<br>Vs overall average: ",
+      if_else(diff_from_avg >= 0, "+", ""),
+      round(diff_from_avg * 100, 1), " pts",
+      "<br>Relative tilt level: ", round(rate_ratio, 1), "x overall"
+    )
+  )
+
+plot_ly() %>%
+  add_bars(
+    data = streak_plot_data,
+    x = ~streak_number,
+    y = ~tilt_rate,
+    hovertext = ~hover_text,
+    hovertemplate = "%{hovertext}<extra></extra>",
+    marker = list(
+      color = streak_plot_data$fill_col,
+      line = list(color = "white", width = 1)
+    ),
+    width = 0.72,
+    showlegend = FALSE
+  ) %>%
+  add_text(
+    data = streak_plot_data %>% filter(tilt_rate >= 0.06),
+    x = ~streak_number,
+    y = ~label_y_high,
+    text = ~label,
+    textfont = list(color = "white", size = 12, family = "Arial Black"),
+    hoverinfo = "skip",
+    showlegend = FALSE
+  ) %>%
+  add_text(
+    data = streak_plot_data %>% filter(tilt_rate < 0.06),
+    x = ~streak_number,
+    y = ~label_y_low,
+    text = ~label,
+    textfont = list(color = "#333333", size = 12, family = "Arial Black"),
+    hoverinfo = "skip",
+    showlegend = FALSE
+  ) %>%
+  layout(
+    title = list(
+      text = paste0(
+        "<b>Tilt builds during losing streaks</b>",
+        "<br><span style='font-size:11px;color:#666666;'>",
+        "Negative mental state is most common when losses stack up",
+        "</span>"
+      ),
+      x = 0,
+      xanchor = "left"
+    ),
+    xaxis = list(
+      title = list(text = "<b>Streak length</b>"),
+      tickvals = c(-3, -2, -1, 0, 1, 2, 3),
+      ticktext = c("-3", "-2", "-1", "0", "1", "2", "3"),
+      showgrid = FALSE,
+      zeroline = FALSE
+    ),
+    yaxis = list(
+      title = list(text = "<b>Probability of negative mental state</b>"),
+      range = c(0, 0.44),
+      tickformat = ".0%",
+      showgrid = TRUE,
+      gridcolor = "#E6E6E6",
+      zeroline = FALSE
+    ),
+    shapes = list(
+      list(
+        type = "line",
+        x0 = -3.5,
+        x1 = 3.5,
+        y0 = baseline_neg,
+        y1 = baseline_neg,
+        xref = "x",
+        yref = "y",
+        line = list(
+          color = "#333333",
+          width = 1,
+          dash = "dash"
+        )
+      )
+    ),
+    annotations = list(
+      list(
+        x = -0.45,
+        y = baseline_neg + 0.015,
+        text = paste0("Overall average: ", percent(baseline_neg, accuracy = 0.1)),
+        showarrow = FALSE,
+        bgcolor = "white",
+        bordercolor = "rgba(0,0,0,0.25)",
+        borderwidth = 1,
+        align = "left",
+        font = list(color = "#333333", size = 11)
+      ),
+
+      # Arrow first so the label appears on top of it
+      list(
+        x = -2.65,
+        y = 0.38,
+        ax = -0.2,
+        ay = 0.38,
+        xref = "x",
+        yref = "y",
+        axref = "x",
+        ayref = "y",
+        text = "",
+        showarrow = TRUE,
+        arrowhead = 2,
+        arrowsize = 1,
+        arrowwidth = 1.5,
+        arrowcolor = "#222222"
+      ),
+
+      list(
+        x = -0.2,
+        y = 0.395,
+        text = "<b>Longest losing streaks<br>show the highest tilt</b>",
+        showarrow = FALSE,
+        bgcolor = "white",
+        bordercolor = "rgba(0,0,0,0.25)",
+        borderwidth = 1,
+        align = "left",
+        font = list(color = "#333333", size = 12)
+      ),
+
+      list(
+        x = 1.65,
+        y = 0.14,
+        text = "Winning streaks<br>rarely show tilt",
+        showarrow = FALSE,
+        bgcolor = "white",
+        bordercolor = "rgba(0,0,0,0.20)",
+        borderwidth = 1,
+        align = "left",
+        font = list(color = "#666666", size = 11)
+      )
+    ),
+    plot_bgcolor = "white",
+    paper_bgcolor = "white",
+    margin = list(l = 80, r = 45, t = 70, b = 60)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+Longer losing streaks are associated with much higher rates of negative mental state. The highest tilt levels appear during the longest losing streaks, while winning streaks rarely coincide with tilt.
+
+This suggests that tilt is associated not only with isolated setbacks, but with repeated losses over time.
+
+Together with the previous SR chart, this strengthens the idea that poor performance and negative mental state may reinforce one another across matches.
+
+## The Tilt Loop
+
+The previous charts show three connected patterns: negative mental state is associated with losing, ranking-point losses are associated with negative mental state, and losing streaks are associated with negative mental state.
+
+The final question is whether this relationship continues after a tilted loss.
+
+> After a loss in a negative mental state, does the risk of losing remain elevated across the following matches?
+
+Losing streak → negative mental state → higher loss risk → continued losing
+
+```{r}
+#| label: fig-tilt-loop
+#| fig-cap: "Tilted losses often continue into losing streaks."
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4.3
+#| out-width: "100%"
+
+library(tidyverse)
+library(scales)
+library(plotly)
+
+tilt_future <- ow_clean %>%
+  arrange(game_id) %>%
+  mutate(
+    result = str_to_lower(result),
+    next_1 = lead(result, 1),
+    next_2 = lead(result, 2),
+    next_3 = lead(result, 3),
+    next_4 = lead(result, 4),
+    next_5 = lead(result, 5)
+  ) %>%
+  filter(
+    result == "loss",
+    mental_state == "Negative"
+  )
+
+overall_loss_rate <- ow_clean %>%
+  mutate(result = str_to_lower(result)) %>%
+  summarise(loss_rate = mean(result == "loss", na.rm = TRUE)) %>%
+  pull(loss_rate)
+
+match1_data <- tilt_future %>%
+  filter(!is.na(next_1)) %>%
+  summarise(
+    future_step = 1,
+    future_match = "Match +1",
+    loss_rate = mean(next_1 == "loss"),
+    sample_size = n(),
+    losses = sum(next_1 == "loss"),
+    non_losses = sum(next_1 != "loss")
+  )
+
+match2_data <- tilt_future %>%
+  filter(next_1 == "loss", !is.na(next_2)) %>%
+  summarise(
+    future_step = 2,
+    future_match = "Match +2",
+    loss_rate = mean(next_2 == "loss"),
+    sample_size = n(),
+    losses = sum(next_2 == "loss"),
+    non_losses = sum(next_2 != "loss")
+  )
+
+match3_data <- tilt_future %>%
+  filter(next_1 == "loss", next_2 == "loss", !is.na(next_3)) %>%
+  summarise(
+    future_step = 3,
+    future_match = "Match +3",
+    loss_rate = mean(next_3 == "loss"),
+    sample_size = n(),
+    losses = sum(next_3 == "loss"),
+    non_losses = sum(next_3 != "loss")
+  )
+
+match4_data <- tilt_future %>%
+  filter(next_1 == "loss", next_2 == "loss", next_3 == "loss", !is.na(next_4)) %>%
+  summarise(
+    future_step = 4,
+    future_match = "Match +4",
+    loss_rate = mean(next_4 == "loss"),
+    sample_size = n(),
+    losses = sum(next_4 == "loss"),
+    non_losses = sum(next_4 != "loss")
+  )
+
+match5_data <- tilt_future %>%
+  filter(next_1 == "loss", next_2 == "loss", next_3 == "loss", next_4 == "loss", !is.na(next_5)) %>%
+  summarise(
+    future_step = 5,
+    future_match = "Match +5",
+    loss_rate = mean(next_5 == "loss"),
+    sample_size = n(),
+    losses = sum(next_5 == "loss"),
+    non_losses = sum(next_5 != "loss")
+  )
+
+tilt_loop_summary <- bind_rows(
+  match1_data,
+  match2_data,
+  match3_data,
+  match4_data,
+  match5_data
+) %>%
+  mutate(
+    label = percent(loss_rate, accuracy = 1),
+    diff_from_avg = loss_rate - overall_loss_rate,
+    hover_text = paste0(
+      "Cases: ", sample_size,
+      "<br>Next losses: ", losses,
+      "<br>Streak breaks: ", non_losses,
+      "<br>Vs baseline: ",
+      if_else(diff_from_avg >= 0, "+", ""),
+      round(diff_from_avg * 100, 1), " pts"
+    )
+  )
+
+y_axis_min <- max(0, overall_loss_rate - 0.04)
+y_axis_max <- min(1, max(tilt_loop_summary$loss_rate, na.rm = TRUE) + 0.06)
+
+plot_ly() %>%
+  add_lines(
+    data = tilt_loop_summary,
+    x = ~future_step,
+    y = ~loss_rate,
+    hoverinfo = "skip",
+    line = list(
+      color = "#C44E52",
+      width = 4
+    ),
+    showlegend = FALSE
+  ) %>%
+  add_markers(
+    data = tilt_loop_summary,
+    x = ~future_step,
+    y = ~loss_rate,
+    hovertext = ~hover_text,
+    hovertemplate = "%{hovertext}<extra></extra>",
+    marker = list(
+      color = "#C44E52",
+      size = 9,
+      line = list(
+        color = "#9F2F2F",
+        width = 1.5
+      )
+    ),
+    showlegend = FALSE
+  ) %>%
+  add_text(
+    data = tilt_loop_summary,
+    x = ~future_step,
+    y = ~loss_rate + 0.012,
+    text = ~label,
+    textfont = list(
+      color = "black",
+      size = 12,
+      family = "Arial"
+    ),
+    hoverinfo = "skip",
+    showlegend = FALSE
+  ) %>%
+  layout(
+    title = list(
+      text = paste0(
+        "<b>Probability the losing streak continues</b>",
+        "<br><span style='font-size:11px;color:#666666;'>",
+        "Loss risk stays above the normal rate",
+        "</span>"
+              ),
+      x = 0,
+      xanchor = "left"
+    ),
+    xaxis = list(
+      title = list(text = "<b>Future match in the streak</b>"),
+      tickvals = c(1, 2, 3, 4, 5),
+      ticktext = c("Match +1", "Match +2", "Match +3", "Match +4", "Match +5"),
+      showgrid = TRUE,
+      gridcolor = "#E6E6E6",
+      zeroline = FALSE
+    ),
+    yaxis = list(
+      title = list(text = "<b>Probability the losing streak continues</b>"),
+      range = c(y_axis_min, y_axis_max),
+      tickformat = ".0%",
+      showgrid = TRUE,
+      gridcolor = "#E6E6E6",
+      zeroline = FALSE
+    ),
+    shapes = list(
+      list(
+        type = "line",
+        x0 = 0.5,
+        x1 = 5.5,
+        y0 = overall_loss_rate,
+        y1 = overall_loss_rate,
+        xref = "x",
+        yref = "y",
+        line = list(
+          color = "#666666",
+          width = 1.2,
+          dash = "dash"
+        )
+      )
+    ),
+    annotations = list(
+      list(
+        x = 1.15,
+        y = overall_loss_rate + 0.015,
+        text = paste0("Overall loss rate: ", percent(overall_loss_rate, accuracy = 1)),
+        showarrow = FALSE,
+        bgcolor = "white",
+        bordercolor = "rgba(0,0,0,0.25)",
+        borderwidth = 1,
+        align = "left",
+        font = list(
+          color = "#333333",
+          size = 11
+        )
+      )
+    ),
+    plot_bgcolor = "white",
+    paper_bgcolor = "white",
+    margin = list(l = 85, r = 45, t = 75, b = 65)
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+This chart shows persistence rather than a smooth increase. The loss rate does not rise every match, but it remains consistently above the overall loss rate after a tilted loss.
+
+This is the final piece of evidence for the tilt-loop pattern. Negative mental state is not only associated with the match where it is recorded; it is also followed by elevated loss risk across later matches in the same sequence.
+
+Together, the four explanatory charts support the Big Idea: tilt is associated with a much higher loss probability, and after it appears, elevated loss risk persists across multiple matches.
+
+## What the Evidence Shows
+
+Across the four explanatory charts, the same pattern appears from several angles:
+
+-   Negative mental state is associated with a much higher share of losses.
+-   Larger SR losses are associated with a higher probability of negative mental state.
+-   Losing streaks show much higher rates of negative mental state than winning streaks.
+-   After a tilted loss, the chance of continued losing remains above the overall loss rate.
+
+Together, these patterns suggest that match results are not shaped by skill alone. In-game feedback, player mental state, and future performance appear closely connected.
+
+The result is a self-reinforcing tilt loop:
+
+**Poor outcome → negative mental state → higher loss risk → continued poor outcomes**
+
+## Conclusion
+
+This analysis supports the Big Idea: **tilt is associated with a much higher loss probability, and after it appears, elevated loss risk persists across multiple matches.**
+
+The evidence does not prove that tilt alone causes losses. However, it does show a consistent relationship between negative mental state, poor match outcomes, SR loss, and continued losing. In this dataset, tilt appears to be part of a feedback pattern rather than just a one-match reaction.
+
+Understanding this loop has implications beyond gaming. Similar feedback patterns can appear in high-pressure environments where stress, performance, and decision-making influence one another over time.
+
+## Limitations and Uncertainty
+
+This analysis shows association, not causation. Mental state is self-reported, so it may contain subjectivity, memory bias, or reporting bias. A player may record their mental state differently depending on whether the match ended in a win or loss.
+
+The dataset also does not fully control for external factors that could influence both performance and mood, such as team composition, hero choice, matchmaking quality, communication, fatigue, session length, or the behaviour of other players. Some charts also use filtering or aggregation to make patterns easier to interpret, which means they summarise the data rather than showing every individual match.
+
+The results should therefore be interpreted as evidence of a strong relationship between negative mental state, poor outcomes, and continued loss risk, rather than proof that tilt alone causes losses.
+
+## Design Justification
+
+::: {.callout-note collapse="true"}
+The final explanatory charts were designed as a guided sequence: first showing that tilt is associated with losing, then showing the in-game patterns linked with tilt, and finally showing how elevated loss risk persists after a tilted loss.
+
+**Figure 1: Match Outcomes by Mental State**\
+A 100% stacked bar chart was used because the main comparison is proportional: how the mix of wins, draws, and losses changes within each mental-state group. Mental state is placed on the x-axis, outcome is shown by fill colour, and direct loss-percentage labels highlight the key comparison without relying only on the legend.
+
+**Figure 2: SR Change and Negative Mental State**\
+A fitted relationship chart was used because SR change is numerical and the outcome is the probability of negative mental state. The fitted line summarises the overall trend, the binned points show observed values, and the shaded ribbon communicates uncertainty around the estimate.
+
+**Figure 3: Losing Streaks and Negative Mental State**\
+A bar chart was used because streak length is a discrete ordered variable. Bar height shows the probability of negative mental state, while the dashed baseline gives a reference point for the overall tilt rate. Annotations highlight the contrast between losing and winning streaks.
+
+**Figure 4: Future Loss Risk After a Tilted Loss**\
+A line chart was used because the x-axis represents an ordered sequence of future matches. The line and point labels show whether loss risk remains elevated, while the dashed baseline allows comparison with the overall loss rate. This chart connects the earlier evidence into the final tilt-loop interpretation.
+:::
